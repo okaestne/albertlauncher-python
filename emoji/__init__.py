@@ -2,70 +2,34 @@
 
 import json
 import re
-import subprocess
-from concurrent.futures import ThreadPoolExecutor
-from itertools import islice
 from pathlib import Path
+
 from albert import *
 
-md_iid = '1.0'
-md_version = "1.3"
+md_iid = '2.0'
+md_version = "2.0"
 md_name = "Emoji Picker"
-md_description = "Find emojis by name"
+md_description = "Find and copy emojis by name"
 md_license = "GPL-3.0"
 md_url = "https://github.com/albertlauncher/python/tree/master/emoji"
 md_maintainers = "@tyilo"
-md_bin_dependencies = ["convert"]
+
+# todo : use https://github.com/unicode-org/cldr-json/blob/main/cldr-json/cldr-annotations-full/annotations/de/
 
 
-EXTENSION_DIR = Path(__file__).parent
-ALIASES_PATH = EXTENSION_DIR / "aliases.json"
-EMOJI_PATH = EXTENSION_DIR / "emoji-test.txt"
+# class Plugin(PluginInstance, IndexQueryHandler):
+class Plugin(PluginInstance, IndexQueryHandler):
 
+    def __init__(self):
+        IndexQueryHandler.__init__(self,
+                                   id=md_id,
+                                   name=md_name,
+                                   description=md_description,
+                                   defaultTrigger=':',
+                                   synopsis='<emoji name>')
+        PluginInstance.__init__(self, extensions=[self])
 
-def convert_to_png(emoji, output_path):
-    subprocess.run(
-        [
-            "convert",
-            "-pointsize",
-            "64",
-            "-background",
-            "transparent",
-            f"pango:{emoji}",
-            output_path,
-        ]
-    )
-
-
-def schedule_create_missing_icons(emojis, icon_dir_path: Path):
-    executor = ThreadPoolExecutor()
-    for emoji in emojis:
-        path = icon_dir_path / f"{emoji['emoji']}.png"
-        if not path.exists():
-            executor.submit(convert_to_png, emoji["emoji"], path)
-
-    return executor
-
-
-class Plugin(TriggerQueryHandler):
-    def id(self):
-        return __name__
-
-    def name(self):
-        return md_name
-
-    def description(self):
-        return md_description
-
-    def defaultTrigger(self):
-        return ": "
-
-    def synopsis(self):
-        return "<emoji name>"
-
-    def initialize(self):
-        self.icon_dir_path = Path(self.cacheLocation())
-
+    def updateIndexItems(self):
         line_re = re.compile(
             r"""
             ^
@@ -78,61 +42,50 @@ class Plugin(TriggerQueryHandler):
             (?P<version> E\d+.\d+)
             \s*
             (?P<name> [^:]+)
-            (?: : \s* (?P<modifiers> .+))?
+            (?: : \s* (?P<modifier> .+))?
             \n
             $
             """,
             re.VERBOSE,
         )
 
-        with ALIASES_PATH.open("r") as f:
+        root_path = Path(__file__).parent
+        alias_file_path = root_path / "aliases.json"
+        emoji_file_path = root_path / "emoji-test.txt"
+
+        with alias_file_path.open("r") as f:
             aliases = json.load(f)
 
-        self.emojis = []
-        with EMOJI_PATH.open("r") as f:
+        index_items = []
+        with emoji_file_path.open("r") as f:
             for line in f:
                 if m := line_re.match(line):
                     e = m.groupdict()
                     if e["status"] == "fully-qualified":
-                        search_tokens = [e["name"]]
-                        if e["modifiers"]:
-                            search_tokens.append(e["modifiers"])
-                        e["aliases"] = [a.lower() for a in aliases.get(e["name"], [])]
-                        search_tokens += e["aliases"]
-                        e["search_tokens"] = search_tokens
-                        self.emojis.append(e)
+                        emoji = e['emoji']
+                        identifier = e['name']
+                        names = [identifier.capitalize(), *aliases.get(identifier, [])]
+                        mod = e.get('modifier', None)
 
-        self.icon_executor = schedule_create_missing_icons(self.emojis, self.icon_dir_path)
+                        if mod:
+                            title = f"{identifier.capitalize()} {mod}"
+                        else:
+                            title = identifier.capitalize()
 
-    def finalize(self):
-        self.icon_executor.shutdown(wait=True, cancel_futures=True)
+                        item = StandardItem(
+                            id=emoji,
+                            text=title,
+                            subtext=", ".join([a.capitalize() for a in names]),
+                            iconUrls=[f"gen:?text={emoji}"],
+                            actions=[
+                                Action(
+                                    "copy",
+                                    "Copy to clipboard",
+                                    lambda emj=emoji: setClipboardText(emj),
+                                ),
+                            ]
+                        )
 
-    def matched_emojis(self, query_tokens):
-        for emoji in self.emojis:
-            for w in query_tokens:
-                if w not in " ".join(emoji["search_tokens"]):
-                    break
+                        index_items.extend([IndexItem(item, f"{n} {mod}" if mod else n) for n in names])
 
-                yield emoji
-
-    def handleTriggerQuery(self, query):
-        query_tokens = query.string.strip().lower().split()
-        if not query_tokens:
-            return
-
-        for emoji in islice(self.matched_emojis(query_tokens), 100):
-            query.add(
-                Item(
-                    id=f"emoji_{emoji['emoji']}",
-                    text=f"{emoji['emoji']} {emoji['name']}",
-                    subtext=emoji["modifiers"] or "",
-                    icon=[str(self.icon_dir_path / f"{emoji['emoji']}.png")],
-                    actions=[
-                        Action(
-                            "copy",
-                            "Copy to clipboard",
-                            lambda r=emoji["emoji"]: setClipboardText(r),
-                        ),
-                    ],
-                )
-            )
+        self.setIndexItems(index_items)
